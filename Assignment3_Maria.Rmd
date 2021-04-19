@@ -1,0 +1,482 @@
+---
+title: "Assignment 3 - Applying meta-analytic priors"
+author: "Riccardo Fusaroli"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+pacman::p_load("readr", "rethinking", "brms", "tidyverse", "patchwork", "metafor")
+```
+
+## Assignment 3
+
+In this assignment we do the following:
+- we run a Bayesian meta-analysis of pitch variability in ASD, based on previously published literature
+- we analyze pitch variability in ASD in two new studies using both a conservative and a meta-analytic prior
+- we assess the difference in model quality and estimates using the two priors. 
+
+The questions you need to answer are: What are the consequences of using a meta-analytic prior? Evaluate the models with conservative and meta-analytic priors. Discuss the effects on estimates. Discuss the effects on model quality. Discuss the role that meta-analytic priors should have in scientific practice. Should we systematically use them? Do they have drawbacks? Should we use them to complement more conservative approaches? How does the use of meta-analytic priors you suggest reflect the skeptical and cumulative nature of science?
+
+### Step by step suggestions
+
+Step 1: Perform a meta-analysis of pitch variability from previous studies of voice in ASD
+- N.B. all you need is in the two intro videos
+- the data is available as Ass3_MetaAnalysisData.tsv
+- You should calculate Effect size (cohen's d) and Standard Error (uncertainty in the Cohen's d) per each study, using escalc() from the metafor package (also check the livecoding intro)
+- N.B. for the purpose of the assignment we're only interested in getting a meta-analytic effect size for the meta-analytic prior (and not e.g. all the stuff on publication bias). See a brms tutorial here: https://vuorre.netlify.com/post/2016/09/29/meta-analysis-is-a-special-case-of-bayesian-multilevel-modeling/ The formula is EffectSize | se(StandardError) ~ 1 + (1 | Paper). Don't forget prior definition, model checking, etc.
+- N.B. the livecoding video is not perfect, you *can* (but don't have to) improve it: use a t-student likelihood, test the effects of the priors and refine them, check the robustness of results to more or less skeptical priors, etc. 
+- Write down the results of the meta-analysis in terms of a prior for step 2.
+
+```{r}
+#full dataframe of the metaanalysis, includes paper, author, diagnosis, population (some papers are repeated becuase they have 2 different studies, some of them have different populations e.g. groups of participants).
+#Task: constrained is i.e. when you have to read something specific aloud, spontaneous can be describing an image)
+
+#first read through "import dataset" under environment, the 2nd reader and then select tab
+MA_d <- as.data.frame(Ass3_MetaAnalysisData)
+
+```
+
+In this study we do not differientate between studies who measured pitch in Hertz and studies that measured pitch in on a log-scale. 
+Pitch_range = difference between highest and lowest possible pitch levels 
+PitchVariability = takes the measure of variability no matter if it is range, standard deviation etc. 
+```{r}
+#making sure all values in these columns are read as numbers, as some of them are currently read as characters
+MA_d <- MA_d %>% 
+  mutate(
+    PitchVariabilityASD_Mean = as.numeric(PitchVariabilityASD_Mean),
+    PitchVariabilityTD_Mean = as.numeric(PitchVariabilityTD_Mean),
+    PitchVariabilityASD_SD = as.numeric(PitchVariabilityASD_SD),
+    PitchVariabilityTD_SD = as.numeric(PitchVariabilityTD_SD),
+  )
+
+#take a sec to see what is in the data - just for good measure
+colnames(MA_d)
+```
+
+We will be calculating effect sizes within-study, e.g. one effect size for each row.
+```{r}
+MA_d <- MA_d %>% subset(!is.na(Paper)) #exclude NAs
+
+#run escalc function
+MA_d <- escalc(measure = "SMD",
+            n1i = TD_N,
+            n2i = ASD_N,
+            m1i = PitchVariabilityTD_Mean,
+            m2i = PitchVariabilityASD_Mean,
+            sd1i = PitchVariabilityTD_SD,
+            sd2i = PitchVariabilityASD_SD,
+            data = MA_d,
+            slab = Paper)
+
+#escalc will now have added 2 new columns, yi and vi.
+#we can calculate the standard error (measure of uncertainty and heterogenity of the single indiviudals of study combined with number of participants) by taking the square of the standard deviation
+
+MA_d <- MA_d %>% 
+  mutate(
+    StandardError = sqrt(vi)
+  ) %>% rename(
+    EffectSize = yi
+  )
+```
+
+Escalc explanation: 
+- measure = SMD --> which kind of effect size you want to calculate, here it is standardized mean difference
+- n1i = How many participants in group 1
+- n2i = How many participants in group 2
+- m1i and m2i --> the mean of the variable you are trying to calculate an effect size for
+- sd1 and sd2 --> the sd of --//--
+- slab --> if we create a plot, what should then be the name of the plot (?)
+
+- yi = effect size for a given study
+- vi = variance of the effect size. the variance is the square of the standard deviation. 
+
+#around 18.00 minutes in
+```{r}
+#if we investigate Effect Size we can see 11 NAs, because some studies did not collect pitch-information
+summary(MA_d$EffectSize)
+```
+- We have 11 NAs because some studies did not have pitch-info
+- The median effect size is -0.65338 standard deviations (Which means that TD have smaller standard deviations than ASD. This is because we set TD as group 1, so the median is calculated based on TD minus ASD. So less variability for TDs)
+- Effect sizes vary from -1.29 to 0.52
+
+```{r}
+summary(MA_d$StandardError)
+```
+- still 11 NAs
+- Only positive values which is good
+- goes from 0.22 to 0.48
+#___________________________________________________
+
+Now we want to do an analysis. The goal of the study is to get an idea of the uncertainty of the papers and effect sizes. The bigger the uncertainty, the less emphasis or trust we should put in a study.
+
+```{r}
+#we start out with a bayesian formula. We run the random effects on population instead of paper to avoid confounds in the papers where two different studies use the same population group)
+MA_f <- bf(EffectSize|se(StandardError) ~ 1 + (1 | Population))
+
+get_prior(MA_f, data = MA_d, family = gaussian()) #we get intercept, sd, sd for the population and sd/intercept for population
+
+MA_prior <- c(
+  prior(normal(0,1), class = Intercept), 
+  prior(normal(0, .3), class = sd)) #reasoning at 24.00 in the video
+
+#make the first meta analysis model
+MA_m0 <- brm(
+  MA_f,
+  data = MA_d,
+  family = gaussian(),
+  prior = MA_prior,
+  sample_prior = "only", #don't look at the real data yet
+  file = "MA_m0",
+  chains = 2, #to minimize runtime
+  cores = 2 #run chains in parallel
+)
+
+#see prior predicitive checks
+p0 <- pp_check(MA_m0, nsamples = 100)
+p0 #it's not too bad, ric says it's acceptable. It could be better if we shrunk the sd of intercept to 0.5
+
+#run the model on our data
+MA_m1 <- brm(
+  MA_f,
+  data = MA_d,
+  family = gaussian(),
+  prior = MA_prior,
+  sample_prior = T, #now use the real data
+  file = "MA_m1",
+  chains = 2, 
+  cores = 2
+)
+
+p1 <- pp_check(MA_m1, nsamples = 100)
+p1 #looks good
+
+summary(MA_m1)
+
+
+#MA effect mean = -0.43, sd = 0.1 (informed priors)
+MA_mean <- fixef(MA_m1)[[1]]
+MA_se <- fixef(MA_m1)[[2]]
+
+MA_heterogeneity = 0.32
+  
+```
+
+
+
+Step 2: Analyse pitch variability in ASD in two new studies for which you have access to all the trials (not just study level estimates)
+- the data is available as Ass3_data.csv. Notice there are 2 studies (language us, and language dk), multiple trials per participant, and a few different ways to measure pitch variability (if in doubt, focus on pitch IQR, interquartile range of the log of fundamental frequency)
+- Also, let's standardize the data, so that they are compatible with our meta-analytic prior (Cohen's d is measured in SDs).
+- Is there any structure in the dataset that we should account for with random/varying effects? How would you implement that? Or, if you don't know how to do bayesian random/varying effects or don't want to bother, is there anything we would need to simplify in the dataset?
+
+```{r}
+#read data
+data <- read.csv("Ass3_data.csv")
+
+#standardize 
+data <- data %>% 
+  mutate(
+    IQR = (Pitch_IQR - mean(Pitch_IQR, na.rm = T))/sd(Pitch_IQR, na.rm = T),
+    PitchMean = (Pitch_Mean - mean(Pitch_Mean, na.rm = T))/sd(Pitch_Mean, na.rm = T),
+    PitchSD = (Pitch_SD - mean(Pitch_SD, na.rm = T))/sd(Pitch_SD, na.rm = T),
+    PitchMedian = (Pitch_Median - mean(Pitch_Median, na.rm = T))/sd(Pitch_Median, na.rm = T)
+  )
+
+#we need to make random intercept because of repeated meassures 
+```
+
+
+Step 3: Build a regression model predicting Pitch variability from Diagnosis.
+- how is the outcome distributed? (likelihood function). NB. given we are standardizing, and the meta-analysis is on that scale, gaussian is not a bad assumption, but check t-student as well. Lognormal would require us to convert the prior to that scale.
+- how are the parameters of the likelihood distribution distributed? Which predictors should they be conditioned on? Start simple, with Diagnosis only. Add other predictors only if you have the time and energy!
+- use a skeptical/conservative prior for the effects of diagnosis. Remember you'll need to motivate it, test its predictions (prior predictive checks), its impact on the posteriors (prior posterior updates checks).
+- Evaluate model quality. Describe and plot the estimates. 
+
+```{r}
+#density plot of outcome
+dens(data$IQR)
+
+#see levels and make factor
+levels(data$Diagnosis)
+levels(data$Language)
+
+data <- data %>% 
+  mutate(Diagnosis = as.factor(Diagnosis), #as factor
+         Language = as.factor(Language)) #as factor
+
+
+#make model formula
+model_f <- bf(IQR ~ 1 + Diagnosis + (1|ID) + (1|Language))
+
+#get priors
+get_prior(data_f, data = data, family = gaussian()) #we need to set priors for b, intercept, sigma, and sd 
+
+#make priors
+data_prior <- c(
+  prior(normal(0,0.25), class = b), 
+  prior(normal(0,0.5), class = Intercept), 
+  prior(normal(0,1), class = sigma), 
+  prior(normal(0, 0.3), class = sd)) #reasoning 
+
+
+#make the first model
+data_m0 <- brm(
+  model_f,
+  data = data,
+  family = gaussian(),
+  prior = data_prior,
+  sample_prior = "only", #don't look at the real data yet
+  file = "data_m0",
+  chains = 2, #to minimize runtime
+  cores = 2 #run chains in parallel
+)
+
+
+pp_m0 <- pp_check(data_m0, nsamples = 100)
+pp_m0
+```
+
+Now to actually running the model on the data
+
+```{r}
+#make the real model
+data_m1 <- brm(
+  data_f,
+  data = data,
+  family = gaussian(),
+  prior = data_prior,
+  sample_prior = T, #look at the real data
+  file = "data_m1",
+  chains = 2, #to minimize runtime
+  cores = 2 #run chains in parallel
+)
+
+#run posterior predictive checks
+pp_m1 <- pp_check(data_m1, nsamples = 100)
+pp_m1 #pretty
+```
+Further plotting 
+
+```{r}
+## plotting
+#posterior definition 
+posterior <-  posterior_samples(data_m1)
+
+
+#plotting the intercept
+p1<- ggplot(posterior) +
+  theme_classic() +
+  geom_density(aes(prior_Intercept), fill="red", alpha=0.3) +
+  geom_density(aes(b_Intercept), fill="blue", alpha=0.5)
+
+#plotting sigma
+p2 <- ggplot(posterior) +
+  theme_classic() +
+  geom_density(aes(prior_sigma), fill="red", alpha=0.3) +
+  geom_density(aes(sigma), fill="blue", alpha=0.5) 
+
+#plotting the beta value 
+p3 <- ggplot(posterior) +
+  theme_classic() +
+  geom_density(aes(prior_b), fill="red", alpha=0.3) +
+  geom_density(aes(b_DiagnosisTD), fill="blue", alpha=0.5)
+
+#show all the plots together
+p1+p2+p3
+
+#Assessing the evidence in favor of increased variability in pitch IQR for ASD.
+conditional_effects(data_m1) #shows model predictions
+
+plot(conditional_effects(data_m1, spaghetti=T, nsamples=100, method = "fitted"), points=T)
+#Samples100 lines from the mean expected value, and then we can see which are the optimal models that are compatible with this standard error.
+
+plot(conditional_effects(data_m1, spaghetti=T, nsamples=100, method = "predict"), points=T) # here we say, show us also the sigma aka what we know we should expect as an error
+
+#hypothesis testing
+hypothesis(data_m1, "DiagnosisTD < 0")
+hypothesis(data_m1, "DiagnosisTD > 0")
+plot(hypothesis(data_m1, "DiagnosisTD < 0")) #shortcut for plotting
+plot(hypothesis(data_m1, "DiagnosisTD > 0")) #shortcut for plotting
+    
+```
+
+
+Step 4: Now re-run the model with the meta-analytic prior
+- Evaluate model quality. Describe and plot the estimates. 
+- N.B. you need to assess the meta-analytic informed prior (prior pred checks, prior-posterior update checks) and if relevant you can always change it in motivated ways (e.g. too confident, doesn't let the model actually learn from the data, so increase sd)
+
+```{r}
+#make informed prior
+data_informed_prior <- c(
+  prior(normal(-0.43,0.1), class = b), #informed prior from meta analysis
+  prior(normal(0,0.5), class = Intercept), #kept the same as before, same for the rest
+  prior(normal(0,1), class = sigma), 
+  prior(normal(0, 0.3), class = sd)) 
+ 
+
+#make the first model
+data_informed_m0 <- brm(
+  data_f,
+  data = data,
+  family = gaussian(),
+  prior = data_informed_prior,
+  sample_prior = "only", #don't look at the real data yet
+  file = "data_informed_m0",
+  chains = 2, #to minimize runtime
+  cores = 2 #run chains in parallel
+)
+
+
+m0_informed <- pp_check(data_informed_m0, nsamples = 100)
+m0_informed
+
+#make the real model
+data_informed_m1 <- brm(
+  data_f,
+  data = data,
+  family = gaussian(),
+  prior = data_informed_prior,
+  sample_prior = T, #look at the real data
+  file = "data_informed_m1",
+  chains = 2, #to minimize runtime
+  cores = 2 #run chains in parallel
+)
+
+
+m1_informed <- pp_check(data_informed_m1, nsamples = 100)
+m1_informed #pretty
+```
+
+Further plotting
+
+```{r}
+## plotting
+#posterior definition
+posterior_informed <-  posterior_samples(data_informed_m1)
+
+
+#plotting the intercept
+p1_informed <- ggplot(posterior_informed) +
+  theme_classic() +
+  geom_density(aes(prior_Intercept), fill="red", alpha=0.3) +
+  geom_density(aes(b_Intercept), fill="blue", alpha=0.5)
+
+#plotting sigma
+p2_informed <- ggplot(posterior_informed) +
+  theme_classic() +
+  geom_density(aes(prior_sigma), fill="red", alpha=0.3) +
+  geom_density(aes(sigma), fill="blue", alpha=0.5) 
+
+#plotting the beta value 
+p3_informed <- ggplot(posterior_informed) +
+  theme_classic() +
+  geom_density(aes(prior_b), fill="red", alpha=0.3) +
+  geom_density(aes(b_DiagnosisTD), fill="blue", alpha=0.5)
+
+#show all the plots together
+p1_informed+p2_informed+p3_informed
+
+```
+
+
+```{r}
+#the prior was too narrow, so we change sd from 0.1 to 0.3
+
+data_informed_prior_edit <- c(
+  prior(normal(-0.43,0.3), class = b), 
+  prior(normal(0,0.5), class = Intercept),
+  prior(normal(0,0.3), class = sd), #change in prior from 0.1 to 0.3
+  prior(normal(0, 1), class = sigma))
+
+#model it
+data_informed_m1.2 <- brm(
+  data_f,
+  data = data,
+  family = gaussian(),
+  prior = data_informed_prior_edit,
+  sample_prior = T, #look at data
+  file = "data_informed_m1.2",
+  chains = 2, #to minimize runtime
+  cores = 2 #run chains in parallel
+)
+
+m1.2_informed <- pp_check(data_informed_m1.2, nsamples = 100)
+m1.2_informed #good
+
+```
+Plotting
+
+```{r}
+## plotting
+#posterior definition
+posterior_informed <-  posterior_samples(data_informed_m1.2)
+
+
+#plotting the intercept
+p1_informed_new <- ggplot(posterior_informed) +
+  theme_classic() +
+  geom_density(aes(prior_Intercept), fill="red", alpha=0.3) +
+  geom_density(aes(b_Intercept), fill="blue", alpha=0.5)
+
+#plotting sigma
+p2_informed_new <- ggplot(posterior_informed) +
+  theme_classic() +
+  geom_density(aes(prior_sigma), fill="red", alpha=0.3) +
+  geom_density(aes(sigma), fill="blue", alpha=0.5) 
+
+#plotting the beta value 
+p3_informed_new <- ggplot(posterior_informed) +
+  theme_classic() +
+  geom_density(aes(prior_b), fill="red", alpha=0.3) +
+  geom_density(aes(b_DiagnosisTD), fill="blue", alpha=0.5)
+
+#show all the plots together
+p1_informed_new+p2_informed_new+p3_informed_new #the plotting for beta looks a lot better now!
+```
+
+
+```{r}
+#Assessing the evidence in favor of increased variability in pitch IQR for ASD.
+conditional_effects(data_informed_m1.2) #shows model predictions
+
+plot(conditional_effects(data_informed_m1.2, spaghetti=T, nsamples=100, method = "fitted"), points=T)
+#Samples100 lines from the mean expected value, and then we can see which are the optimal models that are compatible with this standard error.
+
+plot(conditional_effects(data_informed_m1.2, spaghetti=T, nsamples=100, method = "predict"), points=T) # here we say, show us also the sigma aka what we know we should expect as an error
+
+#hypothesis testing
+hypothesis(data_informed_m1.2, "DiagnosisTD < 0")
+plot(hypothesis(data_informed_m1.2, "DiagnosisTD < 0"))
+hypothesis(data_informed_m1.2, "DiagnosisTD > 0")
+plot(hypothesis(data_informed_m1.2, "DiagnosisTD > 0"))
+
+#run summary
+summary(data_informed_m1.2)
+```
+
+
+Step 5: Compare the models
+- Plot priors and posteriors of the diagnosis effect in both models
+- Compare posteriors between the two models
+- Compare the two models (LOO)
+- Discuss how they compare and whether any of them is best.
+
+```{r}
+
+```
+
+
+Step 6: Prepare a nice write up of the analysis and answer the questions at the top.
+
+Optional step 7: how skeptical should a prior be?
+- Try different levels of skepticism and compare them both plotting the impact on the inferred effect size and using LOO.
+
+Optional step 8: Include other predictors
+- Do age, gender and education improve the model?
+- Should they be main effects or interactions?
+
+Optional step 9: generalized linear models
+- If you wanted to preserve the lognormal distribution of the pitch variability, what would 
