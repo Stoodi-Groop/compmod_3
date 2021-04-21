@@ -212,7 +212,7 @@ data <- data %>%
 model_f <- bf(IQR ~ 1 + Diagnosis + (1|ID) + (1|Language))
 
 #get priors
-get_prior(data_f, data = data, family = gaussian()) #we need to set priors for b, intercept, sigma, and sd 
+get_prior(model_f, data = data, family = gaussian()) #we need to set priors for b, intercept, sigma, and sd 
 
 #make priors
 data_prior <- c(
@@ -244,7 +244,7 @@ Now to actually running the model on the data
 ```{r}
 #make the real model
 data_m1 <- brm(
-  data_f,
+  model_f,
   data = data,
   family = gaussian(),
   prior = data_prior,
@@ -319,7 +319,7 @@ data_informed_prior <- c(
 
 #make the first model
 data_informed_m0 <- brm(
-  data_f,
+  model_f,
   data = data,
   family = gaussian(),
   prior = data_informed_prior,
@@ -335,7 +335,7 @@ m0_informed
 
 #make the real model
 data_informed_m1 <- brm(
-  data_f,
+  model_f,
   data = data,
   family = gaussian(),
   prior = data_informed_prior,
@@ -386,9 +386,9 @@ p1_informed+p2_informed+p3_informed
 #the prior was too narrow, so we change sd from 0.1 to 0.3
 
 data_informed_prior_edit <- c(
-  prior(normal(-0.43,0.3), class = b), 
+  prior(normal(-0.43,0.3), class = b), #change in prior from 0.1 to 0.3
   prior(normal(0,0.5), class = Intercept),
-  prior(normal(0,0.3), class = sd), #change in prior from 0.1 to 0.3
+  prior(normal(0,0.3), class = sd), 
   prior(normal(0, 1), class = sigma))
 
 #model it
@@ -451,7 +451,7 @@ plot(conditional_effects(data_informed_m1.2, spaghetti=T, nsamples=100, method =
 hypothesis(data_informed_m1.2, "DiagnosisTD < 0")
 plot(hypothesis(data_informed_m1.2, "DiagnosisTD < 0"))
 hypothesis(data_informed_m1.2, "DiagnosisTD > 0")
-plot(hypothesis(data_informed_m1.2, "DiagnosisTD > 0"))
+
 
 #run summary
 summary(data_informed_m1.2)
@@ -465,6 +465,35 @@ Step 5: Compare the models
 - Discuss how they compare and whether any of them is best.
 
 ```{r}
+data_informed_m1.2 <- add_criterion(data_informed_m1.2, criterion = "loo") #add loo
+data_m1 <- add_criterion(data_m1, criterion = "loo") #add loo
+
+#plotting
+plot(loo(data_informed_m1.2))
+plot(loo(data_m1))
+
+data_informed_m1.2 <- add_criterion(data_informed_m1.2, criterion = "loo", reloo = T) #to avoid influential data points
+data_m1 <- add_criterion(data_m1, criterion = "loo", reloo = T) #to avoid influential data points
+
+#plotting
+plot(loo(data_informed_m1.2))
+plot(loo(data_m1))
+
+#see model comparison 
+loo_compare(data_m1, data_informed_m1.2)
+loo_model_weights(data_m1, data_informed_m1.2)
+
+
+#reloo other attempt
+loo1 <- loo(data_m1)
+reloo1 <- reloo(data_m1, loo = loo1, chains = 1)
+
+MAloo1 <- loo(data_informed_m1.2)
+MAreloo1 <- reloo(data_informed_m1.2, loo = loo1, chains = 1)
+
+#see model comparison 
+loo_compare(reloo1, MAreloo1, loo1, MAloo1)
+loo_model_weights(reloo1, MAreloo1, loo1, MAloo1)
 
 ```
 
